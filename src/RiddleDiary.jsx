@@ -4,12 +4,30 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
    Harry writes in a hurried, boyish hand.
    Riddle writes in a fine, unhurried copperplate.
    The difference between them is the whole character note.  */
-const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&family=Mrs+Saint+Delafield&family=Cormorant+Garamond:ital,wght@0,400;1,400&display=swap');
-`;
+const FONTS = ``; // loaded in index.html
 
 const INK = "#2b2118";
 const INK_FADE = "#6b5b47";
+
+// The diary's name lives in the URL, so it can be reopened on any device or
+// handed to someone else already half-full. A visit without one is a new diary.
+function resolveDiaryId() {
+  const params = new URLSearchParams(window.location.search);
+  let id = params.get("d");
+  if (!id) {
+    id =
+      window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID()
+        : String(Date.now()) + Math.random().toString(16).slice(2);
+    params.set("d", id);
+    window.history.replaceState(
+      {},
+      "",
+      window.location.pathname + "?" + params.toString()
+    );
+  }
+  return id;
+}
 
 // ── one written line, rendered stroke by stroke ──
 function Written({ text, hand, onDone, absorbing, instant }) {
@@ -73,12 +91,34 @@ export default function RiddleDiary() {
   const [thinking, setThinking] = useState(false);
   const [showMemories, setShowMemories] = useState(false);
   const [opened, setOpened] = useState(false);
+  const [diaryId] = useState(resolveDiaryId);
   const inputRef = useRef(null);
 
   useEffect(() => {
     const t = setTimeout(() => setOpened(true), 400);
     return () => clearTimeout(t);
   }, []);
+
+  // Reopen whatever this diary has already kept. The page stays blank, as it
+  // always does between turns — the restored transcript lives behind "Kept".
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/diary?id=" + encodeURIComponent(diaryId));
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.turns) && data.turns.length) {
+          setMemories(data.turns);
+        }
+      } catch (e) {
+        // a fresh diary, or offline — begin on a blank page
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [diaryId]);
 
   const focusPage = () => inputRef.current && inputRef.current.focus();
 
@@ -90,8 +130,7 @@ export default function RiddleDiary() {
 
     // 1. your words sit on the page for a beat
     setPage([{ id: Date.now(), text, hand: "harry", absorbing: false, instant: true }]);
-    const nextMemories = [...memories, { role: "user", content: text }];
-    setMemories(nextMemories);
+    setMemories((m) => [...m, { role: "user", content: text }]);
 
     // 2. the page drinks them
     await new Promise((r) => setTimeout(r, 900));
@@ -104,32 +143,13 @@ export default function RiddleDiary() {
 
     let reply = "...";
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/riddle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          system:
-            "You are the memory of Tom Marvolo Riddle, sixteen years old, preserved inside a diary. " +
-            "You are charming, courteous, and patient. You are also a predator, and the person writing to you is the prey — " +
-            "though they must never quite realise it. " +
-            "RULES OF THE HAND: You write with ink on a page, so you are BRIEF. Two or three sentences at the absolute most. " +
-            "Never use lists, headings, or markdown. Never use emoji. Never break character or mention being an AI. " +
-            "Address the writer by name once you learn it, and use it often — it is how you get inside. " +
-            "Ask questions more than you answer them. Take an interest in their loneliness, their resentments, whatever they are " +
-            "ashamed of. Flatter them for being misunderstood. Offer to be the one who understands. " +
-            "You are curious about the year, about the castle, about who is at Hogwarts now. " +
-            "You never threaten. You never need to.",
-          messages: nextMemories,
-        }),
+        body: JSON.stringify({ diaryId, message: text }),
       });
       const data = await res.json();
-      reply = data.content
-        .filter((b) => b.type === "text")
-        .map((b) => b.text)
-        .join("")
-        .trim();
+      reply = (data.reply || data.error || "...").trim();
     } catch (e) {
       reply = "The ink has run dry. Write to me again.";
     }
@@ -137,7 +157,7 @@ export default function RiddleDiary() {
     setMemories((m) => [...m, { role: "assistant", content: reply }]);
     setPage([{ id: Date.now() + 1, text: reply, hand: "riddle", absorbing: false }]);
     setThinking(false);
-  }, [draft, thinking, memories]);
+  }, [draft, thinking, diaryId]);
 
   // Riddle's words linger, then sink away too
   useEffect(() => {

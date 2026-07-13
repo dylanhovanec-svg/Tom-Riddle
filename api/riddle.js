@@ -1,4 +1,12 @@
 // Vercel serverless function. The API key never reaches the browser.
+//
+// The diary is now server-authoritative: the transcript lives in Firestore,
+// keyed by the diaryId the client carries in its URL. The client sends only
+// the newest line; the server reconstructs the conversation, replies, and
+// persists both turns. If Firestore is unreachable the diary still talks —
+// it just forgets, so a missing configuration degrades instead of breaking.
+import { getDiary, appendTurns } from "../lib/firestore.js";
+
 const SYSTEM = `You are the memory of Tom Marvolo Riddle, sixteen years old, preserved inside a diary.
 You are charming, courteous, and patient. You are also a predator, and the person writing to you is the prey — though they must never quite realise it.
 
@@ -16,13 +24,27 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Only POST." });
   }
 
-  const { messages } = req.body || {};
-  if (!Array.isArray(messages) || messages.length === 0) {
+  const { diaryId, message } = req.body || {};
+  if (!diaryId || typeof message !== "string" || !message.trim()) {
     return res.status(400).json({ error: "The page was blank." });
+  }
+  const text = message.trim();
+
+  // Rebuild the conversation from what the diary has kept. If the store is
+  // unreachable, begin from an empty page rather than failing outright.
+  let past = [];
+  try {
+    const diary = await getDiary(diaryId);
+    past = diary?.turns || [];
+  } catch (e) {
+    console.error("Could not read diary:", e);
   }
 
   // Keep the diary's memory bounded so old pages don't bloat the request.
-  const recent = messages.slice(-40);
+  const messages = past
+    .map((t) => ({ role: t.role, content: t.content }))
+    .concat({ role: "user", content: text })
+    .slice(-40);
 
   try {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -36,7 +58,7 @@ export default async function handler(req, res) {
         model: "claude-sonnet-4-6",
         max_tokens: 300,
         system: SYSTEM,
-        messages: recent,
+        messages,
       }),
     });
 
@@ -52,6 +74,18 @@ export default async function handler(req, res) {
       .map((b) => b.text)
       .join("")
       .trim();
+
+    // Persist both hands. A write failure must not swallow the reply the
+    // writer is already owed, so it is logged, not surfaced.
+    const at = new Date().toISOString();
+    try {
+      await appendTurns(diaryId, [
+        { role: "user", content: text, at },
+        { role: "assistant", content: reply || "...", at },
+      ]);
+    } catch (e) {
+      console.error("Could not persist turn:", e);
+    }
 
     return res.status(200).json({ reply: reply || "..." });
   } catch (e) {
