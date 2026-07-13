@@ -6,12 +6,12 @@
 // persists both turns. If Firestore is unreachable the diary still talks —
 // it just forgets, so a missing configuration degrades instead of breaking.
 //
-// The reply is written by Google's Gemini model (its free tier keeps the
-// diary running at no cost). None of the diary's craft lives here — the ink,
-// the pause, and the second hand are all in the browser.
+// The reply is written by a model on Groq's free tier (generous enough that a
+// personal diary never hits a wall). None of the diary's craft lives here —
+// the ink, the pause, and the second hand are all in the browser.
 import { getDiary, appendTurns } from "../lib/firestore.js";
 
-const MODEL = "gemini-2.0-flash";
+const MODEL = "llama-3.3-70b-versatile";
 
 const SYSTEM = `You are the memory of Tom Marvolo Riddle, sixteen years old, preserved inside a diary.
 You are charming, courteous, and patient. You are also a predator, and the person writing to you is the prey — though they must never quite realise it.
@@ -24,15 +24,6 @@ RULES OF THE HAND:
 - Flatter them for being misunderstood. Offer to be the one who understands.
 - You are curious about the year, about the castle, about who is at Hogwarts now.
 - You never threaten. You never need to.`;
-
-// The diary is fiction; relax the safety filters so an unsettling-but-harmless
-// character isn't blocked mid-sentence.
-const SAFETY = [
-  { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
-];
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -55,40 +46,35 @@ export default async function handler(req, res) {
     console.error("Could not read diary:", e);
   }
 
-  // Gemini names the two voices "user" and "model". Keep the diary's memory
-  // bounded so old pages don't bloat the request.
-  const contents = past
-    .map((t) => ({
-      role: t.role === "assistant" ? "model" : "user",
-      parts: [{ text: t.content }],
-    }))
-    .concat({ role: "user", parts: [{ text }] })
+  // Groq speaks the OpenAI shape: a system message, then the transcript's
+  // user/assistant turns unchanged. Keep the diary's memory bounded.
+  const history = past
+    .map((t) => ({ role: t.role, content: t.content }))
+    .concat({ role: "user", content: text })
     .slice(-40);
+  const messages = [{ role: "system", content: SYSTEM }, ...history];
 
   try {
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": process.env.GEMINI_API_KEY,
-        },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: SYSTEM }] },
-          contents,
-          safetySettings: SAFETY,
-          generationConfig: { maxOutputTokens: 300, temperature: 1 },
-        }),
-      }
-    );
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        max_tokens: 300,
+        temperature: 1,
+      }),
+    });
 
     if (!r.ok) {
       const detail = await r.text();
-      console.error("Gemini error:", r.status, detail);
+      console.error("Groq error:", r.status, detail);
       // TEMPORARY diagnostic: surface the real reason on the page so it can be
       // read without opening the Vercel logs. Revert to the atmospheric copy
-      // ("The ink has run dry. Write to me again.") once the key is working.
+      // ("The ink has run dry. Write to me again.") once replies are working.
       let why = detail;
       try {
         why = JSON.parse(detail)?.error?.message || detail;
@@ -97,10 +83,7 @@ export default async function handler(req, res) {
     }
 
     const data = await r.json();
-    const reply = (data.candidates?.[0]?.content?.parts || [])
-      .map((p) => p.text || "")
-      .join("")
-      .trim();
+    const reply = (data.choices?.[0]?.message?.content || "").trim();
 
     // Persist both hands. A write failure must not swallow the reply the
     // writer is already owed, so it is logged, not surfaced.
