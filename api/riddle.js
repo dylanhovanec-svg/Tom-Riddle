@@ -86,7 +86,14 @@ export default async function handler(req, res) {
     if (!r.ok) {
       const detail = await r.text();
       console.error("Gemini error:", r.status, detail);
-      return res.status(502).json({ error: "The ink has run dry. Write to me again." });
+      // TEMPORARY diagnostic: surface the real reason on the page so it can be
+      // read without opening the Vercel logs. Revert to the atmospheric copy
+      // ("The ink has run dry. Write to me again.") once the key is working.
+      let why = detail;
+      try {
+        why = JSON.parse(detail)?.error?.message || detail;
+      } catch (_) {}
+      return res.status(502).json({ error: `[debug ${r.status}] ${why}`.slice(0, 300) });
     }
 
     const data = await r.json();
@@ -110,6 +117,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply: reply || "..." });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: "The ink has run dry. Write to me again." });
+    // TEMPORARY diagnostic (see note above): surface the reason, then revert.
+    return res.status(500).json({ error: `[debug 500] ${e.message}`.slice(0, 300) });
   }
 }
