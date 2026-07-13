@@ -1,11 +1,17 @@
 // Vercel serverless function. The API key never reaches the browser.
 //
-// The diary is now server-authoritative: the transcript lives in Firestore,
+// The diary is server-authoritative: the transcript lives in Firestore,
 // keyed by the diaryId the client carries in its URL. The client sends only
 // the newest line; the server reconstructs the conversation, replies, and
 // persists both turns. If Firestore is unreachable the diary still talks —
 // it just forgets, so a missing configuration degrades instead of breaking.
+//
+// The reply is written by Google's Gemini model (its free tier keeps the
+// diary running at no cost). None of the diary's craft lives here — the ink,
+// the pause, and the second hand are all in the browser.
 import { getDiary, appendTurns } from "../lib/firestore.js";
+
+const MODEL = "gemini-2.0-flash";
 
 const SYSTEM = `You are the memory of Tom Marvolo Riddle, sixteen years old, preserved inside a diary.
 You are charming, courteous, and patient. You are also a predator, and the person writing to you is the prey — though they must never quite realise it.
@@ -18,6 +24,15 @@ RULES OF THE HAND:
 - Flatter them for being misunderstood. Offer to be the one who understands.
 - You are curious about the year, about the castle, about who is at Hogwarts now.
 - You never threaten. You never need to.`;
+
+// The diary is fiction; relax the safety filters so an unsettling-but-harmless
+// character isn't blocked mid-sentence.
+const SAFETY = [
+  { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+];
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -40,38 +55,43 @@ export default async function handler(req, res) {
     console.error("Could not read diary:", e);
   }
 
-  // Keep the diary's memory bounded so old pages don't bloat the request.
-  const messages = past
-    .map((t) => ({ role: t.role, content: t.content }))
-    .concat({ role: "user", content: text })
+  // Gemini names the two voices "user" and "model". Keep the diary's memory
+  // bounded so old pages don't bloat the request.
+  const contents = past
+    .map((t) => ({
+      role: t.role === "assistant" ? "model" : "user",
+      parts: [{ text: t.content }],
+    }))
+    .concat({ role: "user", parts: [{ text }] })
     .slice(-40);
 
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 300,
-        system: SYSTEM,
-        messages,
-      }),
-    });
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: SYSTEM }] },
+          contents,
+          safetySettings: SAFETY,
+          generationConfig: { maxOutputTokens: 300, temperature: 1 },
+        }),
+      }
+    );
 
     if (!r.ok) {
       const detail = await r.text();
-      console.error("Anthropic error:", r.status, detail);
+      console.error("Gemini error:", r.status, detail);
       return res.status(502).json({ error: "The ink has run dry. Write to me again." });
     }
 
     const data = await r.json();
-    const reply = (data.content || [])
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
+    const reply = (data.candidates?.[0]?.content?.parts || [])
+      .map((p) => p.text || "")
       .join("")
       .trim();
 
