@@ -92,20 +92,32 @@ These are load-bearing. They look like arbitrary magic numbers; they are the pro
 
 ## Roadmap
 
-### 1. Persistence (do this next)
+### 1. Persistence — DONE
 
-Currently the diary forgets on tab close. Move to Firestore:
+The diary now lives in Firestore, server-side, so it no longer forgets on tab close.
 
-- `diaries/{diaryId}` → `{ createdAt, turns: [{ role, content, at }], impressions: string }`
-- Diary ID in the URL so a diary can be reopened on any device, or handed to someone else
-  already half-full.
+- `diaries/{diaryId}` → `{ createdAt, updatedAt, turns: [{ role, content, at }], impressions }`
+- Diary ID lives in the URL (`?d=<uuid>`), minted on first visit, so a diary can be
+  reopened on any device or handed to someone else already half-full.
+- The transcript is server-authoritative: the client sends only the newest line to
+  `POST /api/riddle`; the function rebuilds the conversation from Firestore, replies, and
+  appends both turns in a transaction. `GET /api/diary?id=` restores a diary on open.
+- Firestore access is server-only (`lib/firestore.js`); the service-account JSON lives in
+  `FIREBASE_SERVICE_ACCOUNT`, never in client code. If the store is unreachable the diary
+  still talks — it just forgets — so a missing config degrades instead of breaking.
+- **Config still needed:** set `FIREBASE_SERVICE_ACCOUNT` in the Vercel dashboard (see
+  `.env.example`) for persistence to actually take effect.
 
-### 2. The `impressions` field (this is the whole point)
+### 2. The `impressions` field (this is the whole point — do this next)
 
 A hidden, running note of what the diary believes it has learned about the writer — their
 name, their loneliness, their resentments, who they distrust. After each turn, make a
 second cheap model call that updates `impressions` given the new exchange. Inject the
 current `impressions` into the system prompt on every request.
+
+The groundwork is in place: the diary doc already reserves an `impressions` field, and
+`appendTurns` preserves it across writes (`merge: true`). The work is to read it in
+`api/riddle.js`, inject it into `SYSTEM`, and write the updated note back after each reply.
 
 Effect: three sessions later, unprompted, it references something you mentioned once.
 That's the feature people will tell other people about.

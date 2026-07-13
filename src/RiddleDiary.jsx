@@ -9,6 +9,26 @@ const FONTS = ``; // loaded in index.html
 const INK = "#2b2118";
 const INK_FADE = "#6b5b47";
 
+// The diary's name lives in the URL, so it can be reopened on any device or
+// handed to someone else already half-full. A visit without one is a new diary.
+function resolveDiaryId() {
+  const params = new URLSearchParams(window.location.search);
+  let id = params.get("d");
+  if (!id) {
+    id =
+      window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID()
+        : String(Date.now()) + Math.random().toString(16).slice(2);
+    params.set("d", id);
+    window.history.replaceState(
+      {},
+      "",
+      window.location.pathname + "?" + params.toString()
+    );
+  }
+  return id;
+}
+
 // ── one written line, rendered stroke by stroke ──
 function Written({ text, hand, onDone, absorbing, instant }) {
   const [shown, setShown] = useState(instant ? text.length : 0);
@@ -71,12 +91,34 @@ export default function RiddleDiary() {
   const [thinking, setThinking] = useState(false);
   const [showMemories, setShowMemories] = useState(false);
   const [opened, setOpened] = useState(false);
+  const [diaryId] = useState(resolveDiaryId);
   const inputRef = useRef(null);
 
   useEffect(() => {
     const t = setTimeout(() => setOpened(true), 400);
     return () => clearTimeout(t);
   }, []);
+
+  // Reopen whatever this diary has already kept. The page stays blank, as it
+  // always does between turns — the restored transcript lives behind "Kept".
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/diary?id=" + encodeURIComponent(diaryId));
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.turns) && data.turns.length) {
+          setMemories(data.turns);
+        }
+      } catch (e) {
+        // a fresh diary, or offline — begin on a blank page
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [diaryId]);
 
   const focusPage = () => inputRef.current && inputRef.current.focus();
 
@@ -88,8 +130,7 @@ export default function RiddleDiary() {
 
     // 1. your words sit on the page for a beat
     setPage([{ id: Date.now(), text, hand: "harry", absorbing: false, instant: true }]);
-    const nextMemories = [...memories, { role: "user", content: text }];
-    setMemories(nextMemories);
+    setMemories((m) => [...m, { role: "user", content: text }]);
 
     // 2. the page drinks them
     await new Promise((r) => setTimeout(r, 900));
@@ -105,7 +146,7 @@ export default function RiddleDiary() {
       const res = await fetch("/api/riddle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMemories }),
+        body: JSON.stringify({ diaryId, message: text }),
       });
       const data = await res.json();
       reply = (data.reply || data.error || "...").trim();
@@ -116,7 +157,7 @@ export default function RiddleDiary() {
     setMemories((m) => [...m, { role: "assistant", content: reply }]);
     setPage([{ id: Date.now() + 1, text: reply, hand: "riddle", absorbing: false }]);
     setThinking(false);
-  }, [draft, thinking, memories]);
+  }, [draft, thinking, diaryId]);
 
   // Riddle's words linger, then sink away too
   useEffect(() => {
